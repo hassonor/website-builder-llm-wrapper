@@ -1,6 +1,6 @@
 import React, {useEffect, useState, memo} from 'react';
 import {WebContainer} from '@webcontainer/api';
-import {Loader} from './Loader'; // import your existing Loader or create a new one
+import {Loader} from './Loader'; // <-- Your existing Loader or any spinner
 
 interface PreviewFrameProps {
     files: any[];
@@ -8,31 +8,38 @@ interface PreviewFrameProps {
 }
 
 /**
- * Compiles and renders the preview by spawning "npm install"
- * and then "npm run dev". Waits for "server-ready" from the
- * WebContainer. Displays an iframe with the served URL.
+ * Possible phases of the WebContainer setup process.
  */
+type SetupPhase = 'idle' | 'installing' | 'starting' | 'launching' | 'ready';
+
 function PreviewFrameComponent({files, webContainer}: PreviewFrameProps) {
     const [url, setUrl] = useState('');
-    const [isLoading, setIsLoading] = useState(false);
+    const [phase, setPhase] = useState<SetupPhase>('idle');
 
     useEffect(() => {
         async function main() {
             try {
-                // Start the loading indicator
-                setIsLoading(true);
-
-                // 1) Install dependencies
+                // PHASE 1: Installing dependencies
+                setPhase('installing');
+                console.log('[PreviewFrame] Installing dependencies...');
                 const installProcess = await webContainer.spawn('npm', ['install']);
                 installProcess.output.pipeTo(
                     new WritableStream({
                         write(data) {
+                            // For debugging
                             console.log('[npm install output]:', data);
                         },
                     })
                 );
+                // Wait for install to finish (exit code 0)
+                const installExitCode = await installProcess.exit;
+                if (installExitCode !== 0) {
+                    throw new Error(`npm install failed with exit code ${installExitCode}`);
+                }
 
-                // 2) Run dev server
+                // PHASE 2: Starting dev server
+                setPhase('starting');
+                console.log('[PreviewFrame] Starting dev server...');
                 const devProcess = await webContainer.spawn('npm', ['run', 'dev']);
                 devProcess.output.pipeTo(
                     new WritableStream({
@@ -42,45 +49,60 @@ function PreviewFrameComponent({files, webContainer}: PreviewFrameProps) {
                     })
                 );
 
-                // 3) Listen for "server-ready" event
+                // PHASE 3: Launching preview
+                setPhase('launching');
+                console.log('[PreviewFrame] Launching preview (waiting for server-ready)');
+
+                // Listen for server-ready event
                 webContainer.on('server-ready', (port, serverUrl) => {
-                    console.log('Server is ready on port', port, 'URL:', serverUrl);
+                    console.log('[PreviewFrame] Server is ready on port', port, 'URL:', serverUrl);
                     setUrl(serverUrl);
-                    setIsLoading(false); // stop the loader once we have a URL
+                    // PHASE 4: Ready
+                    setPhase('ready');
                 });
             } catch (error) {
                 console.error('Error starting the preview:', error);
-                setIsLoading(false); // stop the loader in case of error
+                // If an error occurs, you can decide how to handle the UI
+                setPhase('idle');
             }
         }
 
         main();
-        // We only want to run once on mount
         // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [webContainer]);
 
     /**
-     * If we're still loading (installing/running dev), show a loading spinner.
-     * If loading is done but no URL is available, show a "Loading..." text or fallback UI.
-     * If we have a URL, render the iframe.
+     * Helper to display a user-friendly label depending on the phase.
      */
-    if (isLoading) {
+    function getPhaseMessage(p: SetupPhase) {
+        switch (p) {
+            case 'installing':
+                return 'Installing dependencies...';
+            case 'starting':
+                return 'Starting dev server...';
+            case 'launching':
+                return 'Launching preview...';
+            default:
+                return '';
+        }
+    }
+
+    /**
+     * Render logic:
+     * 1) If phase is 'ready' and url is set, show the iframe.
+     * 2) Otherwise, show a Loader with a message about the current phase.
+     */
+    if (phase !== 'ready' || !url) {
+        // Show a loader or placeholder while the environment is being prepared
         return (
             <div className="h-full flex flex-col items-center justify-center text-gray-400">
                 <Loader/>
-                <p className="mt-2">Setting up your preview, please wait...</p>
+                <p className="mt-2">{getPhaseMessage(phase)}</p>
             </div>
         );
     }
 
-    if (!url) {
-        return (
-            <div className="h-full flex items-center justify-center text-gray-400">
-                <p>Loading...</p>
-            </div>
-        );
-    }
-
+    // PHASE = 'ready' and we have a URL
     return (
         <iframe
             title="preview-frame"
